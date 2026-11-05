@@ -23,6 +23,7 @@ import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.widget.Switch;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
@@ -34,12 +35,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.LinkedHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    private static final int BG = 0xFFF5F5EF, INK = 0xFF173E35, MUTED = 0xFF66736C,
-            LIME = 0xFFD6ED91, WHITE = Color.WHITE, ORANGE = 0xFF89551D;
+    private static final int LIME = 0xFFD6ED91, WHITE = Color.WHITE, GREEN = 0xFF173E35;
+    private int BG, INK, MUTED, CARD, NOTE, SHIFT_BG, SHIFT_INK, ORANGE;
+    private boolean dark;
     private static final Locale RU = Locale.forLanguageTag("ru");
     private static final int OPEN_CSV = 10, EXPORT_CSV = 11, EXPORT_TEMPLATE = 12;
     private ScheduleStore store;
@@ -49,14 +52,31 @@ public class MainActivity extends Activity {
     private int screen;
     private LinearLayout root, content;
     private ScrollView bodyScroll;
-    private View daySection;
+    private LinearLayout dayDetails;
+    private final Map<LocalDate, LinearLayout> calendarCells = new LinkedHashMap<>();
+    private List<Schedule.Shift> calendarShifts;
+    private PullRefreshLayout refreshLayout;
+    private Button sourceButton, fileButton, resetButton;
+    private int renderedScreen = -1;
+    private int restoredScroll;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private boolean busy;
+    private boolean resetting;
     private String pendingExport;
     private String sourceDraft;
 
     @Override public void onCreate(Bundle state) {
+        dark = getSharedPreferences("appearance", MODE_PRIVATE).getBoolean("dark", false);
+        setTheme(dark ? R.style.AppThemeDark : R.style.AppTheme);
         super.onCreate(state);
+        BG = dark ? 0xFF111C18 : 0xFFF5F5EF;
+        INK = dark ? 0xFFE6EEE7 : GREEN;
+        MUTED = dark ? 0xFFACBEB1 : 0xFF66736C;
+        CARD = dark ? 0xFF203229 : WHITE;
+        NOTE = dark ? 0xFF2B3E2C : 0xFFE7EBD9;
+        SHIFT_BG = dark ? 0xFF354B26 : LIME;
+        SHIFT_INK = dark ? 0xFFE2F2B5 : GREEN;
+        ORANGE = dark ? 0xFFF2BF80 : 0xFF89551D;
         store = new ScheduleStore(this);
         employee = store.owner;
         sourceDraft = store.sourceUrl;
@@ -66,6 +86,7 @@ public class MainActivity extends Activity {
             employee = state.getString("employee"); screen = state.getInt("screen");
             pendingExport = state.getString("export");
             sourceDraft = state.getString("sourceDraft", store.sourceUrl);
+            restoredScroll = state.getInt("scroll");
         }
         render();
         if (store.loadError != null) error(store.loadError);
@@ -77,11 +98,15 @@ public class MainActivity extends Activity {
         state.putString("month", month.toString()); state.putString("day", day.toString());
         state.putString("employee", employee); state.putInt("screen", screen); state.putString("export", pendingExport);
         state.putString("sourceDraft", sourceDraft);
+        state.putInt("scroll", bodyScroll == null ? 0 : bodyScroll.getScrollY());
     }
 
     @Override protected void onDestroy() { io.shutdownNow(); super.onDestroy(); }
 
     private void render() {
+        int scrollPosition = renderedScreen == screen && bodyScroll != null ? bodyScroll.getScrollY() : restoredScroll;
+        restoredScroll = 0; renderedScreen = screen;
+        sourceButton = null; fileButton = null; resetButton = null; refreshLayout = null;
         root = column(); root.setBackgroundColor(BG);
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
@@ -95,15 +120,37 @@ public class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true);
         bodyScroll = scroll;
         content = column(); content.setPadding(dp(20), dp(10), dp(20), dp(24)); scroll.addView(content);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        if (screen == 0) {
+            refreshLayout = new PullRefreshLayout(this, scroll, INK, CARD);
+            refreshLayout.setOnRefresh(this::refreshCurrentSource);
+            refreshLayout.setRefreshing(busy);
+            root.addView(refreshLayout, new LinearLayout.LayoutParams(-1, 0, 1));
+        } else root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         if (screen == 0) calendarScreen(); else sourceScreen();
-        LinearLayout nav = row(); nav.setPadding(dp(8), dp(5), dp(8), dp(5)); nav.setBackgroundColor(WHITE);
-        String[] labels = {"Мой график", "Источник"};
+        LinearLayout nav = row(); nav.setPadding(dp(8), dp(5), dp(8), dp(5)); nav.setBackgroundColor(CARD);
+        String[] labels = {"Мой график", "Настройки"};
         for (int i = 0; i < labels.length; i++) {
             final int tab = i; Button b = button(labels[i], screen == i, () -> { screen = tab; render(); });
             b.setTextSize(13); nav.addView(b, weight());
         }
         root.addView(nav);
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            android.view.WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller != null) {
+                int light = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                controller.setSystemBarsAppearance(dark ? 0 : light, light);
+            }
+        } else {
+            int flags = dark ? 0 : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            if (!dark && android.os.Build.VERSION.SDK_INT >= 27) flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            getWindow().getDecorView().setSystemUiVisibility(flags);
+        }
+        scroll.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() {
+                scroll.getViewTreeObserver().removeOnPreDrawListener(this);
+                scroll.scrollTo(0, scrollPosition); return true;
+            }
+        });
     }
 
     private void monthHeader() {
@@ -135,18 +182,21 @@ public class MainActivity extends Activity {
     }
 
     private void calendarScreen() {
+        calendarCells.clear();
         monthHeader(); employeeSelector();
         List<Schedule.Shift> shifts = Schedule.select(store.all(), month, employee);
+        calendarShifts = shifts;
         Schedule.Totals t = Schedule.totals(shifts, store.rule);
-        LinearLayout summary = column(); summary.setPadding(dp(20), dp(18), dp(20), dp(18)); summary.setBackground(background(INK, 20));
+        LinearLayout summary = column(); summary.setPadding(dp(20), dp(18), dp(20), dp(18)); summary.setBackground(background(GREEN, 20));
         summary.addView(text("МОИ РАБОЧИЕ ЧАСЫ ЗА МЕСЯЦ", 11, LIME, true));
         summary.addView(text(Schedule.hours(t.net), 34, WHITE, true)); gap(summary, 6);
         summary.addView(text(t.count + " смен  ·  обеды " + Schedule.hours(t.lunch), 14, 0xFFE1EAD8, false));
         summary.addView(text("До вычета обедов: " + Schedule.hours(t.gross), 12, 0xFFBBCDC4, false)); content.addView(summary);
         gap(content, 12);
-        if (store.demo) note("Пример графика · подключите свой в разделе «Источник»", () -> { screen = 1; render(); });
-        else if (store.syncedAt == 0 && !store.sourceUrl.isEmpty()) note(busy ? "Загружаем ваш график…" : "График ещё не загружен · откройте «Источник»", () -> { screen = 1; render(); });
+        if (store.demo) note("Пример графика · подключите свой в настройках", () -> { screen = 1; render(); });
+        else if (store.syncedAt == 0 && !store.sourceUrl.isEmpty()) note(busy ? "Загружаем ваш график…" : "График ещё не загружен · откройте настройки", () -> { screen = 1; render(); });
         else if (!store.edits.isEmpty()) note("Локальных правок: " + store.edits.size() + " · сохранены на телефоне", () -> { screen = 1; render(); });
+        else content.addView(text("Потяните вниз в начале экрана, чтобы обновить", 11, MUTED, false));
         gap(content, 10);
         LinearLayout weekdays = row();
         for (String label : new String[]{"ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"}) {
@@ -165,28 +215,47 @@ public class MainActivity extends Activity {
             for (Schedule.Shift s : shifts) if (s.date.equals(date)) { net += s.net(store.rule); count++; edited |= store.edits.containsKey(s.key()); }
             boolean selected = date.equals(day);
             LinearLayout cell = column(); cell.setGravity(Gravity.CENTER);
-            cell.setBackground(background(selected ? INK : count > 0 ? LIME : WHITE, 12));
-            TextView n = text(String.valueOf(number) + (date.equals(LocalDate.now()) ? "·" : ""), 16, selected ? WHITE : INK, true); n.setGravity(Gravity.CENTER); cell.addView(n);
-            TextView small = text(count == 0 ? "—" : compactHours(net) + (edited ? "*" : ""), 9, selected ? LIME : INK, false); small.setGravity(Gravity.CENTER); cell.addView(small);
+            cell.setTag(count > 0);
+            TextView n = text(String.valueOf(number) + (date.equals(LocalDate.now()) ? "·" : ""), 16, INK, true); n.setGravity(Gravity.CENTER); cell.addView(n);
+            TextView small = text(count == 0 ? "—" : compactHours(net) + (edited ? "*" : ""), 9, INK, false); small.setGravity(Gravity.CENTER); cell.addView(small);
+            paintDay(cell, selected);
             cell.setContentDescription(date + ", " + count + " смен, " + Schedule.hours(net));
-            cell.setOnClickListener(v -> {
-                day = date; render();
-                bodyScroll.post(() -> bodyScroll.smoothScrollTo(0, Math.max(0, daySection.getTop() - dp(140))));
-            }); week.addView(cell, params);
+            calendarCells.put(date, cell);
+            cell.setOnClickListener(v -> selectDay(date)); week.addView(cell, params);
         }
         gap(content, 16);
+        dayDetails = column(); dayDetails.setMinimumHeight(dp(190)); content.addView(dayDetails);
+        renderDayDetails();
+        gap(content, 10); content.addView(text("Часы указаны без обеда. * — локальная правка.\nНочная смена целиком относится к дате начала.", 11, MUTED, false));
+    }
+
+    private void selectDay(LocalDate selected) {
+        day = selected;
+        for (Map.Entry<LocalDate, LinearLayout> entry : calendarCells.entrySet()) paintDay(entry.getValue(), entry.getKey().equals(day));
+        renderDayDetails();
+    }
+
+    private void paintDay(LinearLayout cell, boolean selected) {
+        boolean hasShift = Boolean.TRUE.equals(cell.getTag());
+        cell.setSelected(selected);
+        cell.setBackground(background(selected ? (dark ? LIME : GREEN) : hasShift ? SHIFT_BG : CARD, 12));
+        ((TextView) cell.getChildAt(0)).setTextColor(selected ? (dark ? GREEN : WHITE) : hasShift ? SHIFT_INK : INK);
+        ((TextView) cell.getChildAt(1)).setTextColor(selected ? (dark ? GREEN : LIME) : hasShift ? SHIFT_INK : MUTED);
+    }
+
+    private void renderDayDetails() {
+        dayDetails.removeAllViews();
+        List<Schedule.Shift> shifts = calendarShifts;
         LinearLayout title = row(); title.addView(text(day.format(DateTimeFormatter.ofPattern("d MMMM, EEE", RU)), 19, INK, true), weight());
-        daySection = title;
         boolean hasShift = shifts.stream().anyMatch(s -> s.date.equals(day));
-        title.addView(button(hasShift ? "Изменить" : "+ Смена", true, () -> editShift(shifts.stream().filter(s -> s.date.equals(day)).findFirst().orElse(null)))); content.addView(title); gap(content, 8);
+        title.addView(button(hasShift ? "Изменить" : "+ Смена", true, () -> editShift(shifts.stream().filter(s -> s.date.equals(day)).findFirst().orElse(null)))); dayDetails.addView(title); gap(dayDetails, 8);
         int count = 0;
         for (Schedule.Shift s : shifts) if (s.date.equals(day)) { shiftCard(s); count++; }
         if (count == 0) {
             boolean awaiting = store.syncedAt == 0 && !store.sourceUrl.isEmpty();
             LinearLayout empty = card(); empty.addView(text(awaiting ? "Ожидаем график" : "Свободный день", 18, INK, true));
-            empty.addView(text(awaiting ? "Для первой загрузки нужен интернет." : "Добавьте смену или выберите другую дату.", 14, MUTED, false)); content.addView(empty);
+            empty.addView(text(awaiting ? "Для первой загрузки нужен интернет." : "Добавьте смену или выберите другую дату.", 14, MUTED, false)); dayDetails.addView(empty);
         }
-        gap(content, 10); content.addView(text("Часы указаны без обеда. * — локальная правка.\nНочная смена целиком относится к дате начала.", 11, MUTED, false));
     }
 
     private String compactHours(int minutes) {
@@ -201,7 +270,7 @@ public class MainActivity extends Activity {
         if (store.edits.containsKey(s.key())) detail += (detail.isEmpty() ? "" : " · ") + "Изменено на телефоне";
         if (!detail.isEmpty()) { gap(card, 5); card.addView(text(detail, 12, MUTED, false)); }
         card.setContentDescription(s.employee + ", " + s.timeRange() + ". Редактировать смену");
-        card.setOnClickListener(v -> editShift(s)); content.addView(card); gap(content, 8);
+        card.setOnClickListener(v -> editShift(s)); dayDetails.addView(card); gap(dayDetails, 8);
     }
 
     private void chooseOwner() {
@@ -214,7 +283,13 @@ public class MainActivity extends Activity {
     }
 
     private void sourceScreen() {
-        content.addView(text("Ваш график,\nвсегда под рукой", 29, INK, true)); gap(content, 8);
+        content.addView(text("Настройки", 29, INK, true)); gap(content, 16);
+        Switch theme = new Switch(this); theme.setText("Тёмная тема"); theme.setTextSize(17); theme.setTextColor(INK);
+        theme.setPadding(0, dp(12), 0, dp(12)); theme.setChecked(dark); theme.setContentDescription("Тёмная тема"); content.addView(theme);
+        theme.setOnCheckedChangeListener((view, checked) -> {
+            getSharedPreferences("appearance", MODE_PRIVATE).edit().putBoolean("dark", checked).apply(); recreate();
+        });
+        gap(content, 12); content.addView(text("Источник графика", 20, INK, true)); gap(content, 8);
         content.addView(text("Google Таблицы или CSV-файл. После загрузки график доступен без интернета.", 15, MUTED, false)); gap(content, 20);
         LinearLayout status = card(); status.addView(text(store.sourceName, 17, INK, true)); gap(status, 5);
         status.addView(text(store.demo ? "Демонстрационные данные, имена вымышлены" : "Смен в источнике: " + store.source.size(), 13, MUTED, false));
@@ -227,11 +302,11 @@ public class MainActivity extends Activity {
             public void onTextChanged(CharSequence s, int a, int b, int c) { sourceDraft = s.toString(); }
             public void afterTextChanged(Editable s) {}
         });
-        Button sync = button(busy ? "Загрузка…" : "Загрузить по ссылке", true, () -> fetch(url.getText().toString())); sync.setEnabled(!busy); content.addView(sync);
+        Button sync = button(busy ? "Загрузка…" : "Загрузить по ссылке", true, () -> fetch(url.getText().toString())); sourceButton = sync; sync.setEnabled(!busy); content.addView(sync);
         gap(content, 8); Button file = button("Открыть CSV с телефона", false, () -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT); intent.setType("*/*"); intent.addCategory(Intent.CATEGORY_OPENABLE);
             launchDocument(intent, OPEN_CSV);
-        }); file.setEnabled(!busy); content.addView(file); gap(content, 12);
+        }); fileButton = file; file.setEnabled(!busy); content.addView(file); gap(content, 12);
         content.addView(text("Для загрузки по ссылке таблица должна быть доступна на чтение без входа. Для закрытой таблицы скачайте CSV и откройте его здесь.", 13, MUTED, false)); gap(content, 18);
         content.addView(text("Формат таблицы", 20, INK, true)); gap(content, 6);
         content.addView(text("Одна строка — одна смена. Столбцы:\nemployee, department, date, start, end, break_minutes, next_day\n\nПустой break_minutes — обед по правилу. 0 — без обеда. Для ночной смены next_day = true.", 13, MUTED, false)); gap(content, 10);
@@ -242,6 +317,10 @@ public class MainActivity extends Activity {
         if (!store.edits.isEmpty()) {
             gap(content, 10); content.addView(button("Посмотреть и отменить правки", false, this::showEdits));
         }
+        gap(content, 18);
+        content.addView(text("Полный сброс графика", 20, INK, true)); gap(content, 6);
+        content.addView(text("Загрузить актуальную таблицу и убрать все локальные изменения, добавления и удаления. Правило обедов вернётся к исходному. Тема и выбранный сотрудник сохранятся.", 13, MUTED, false));
+        resetButton = button("Сбросить график к таблице", false, this::confirmReset); resetButton.setEnabled(!busy); content.addView(resetButton);
         if (store.demo) {
             gap(content, 14); content.addView(button("Начать с пустого графика", false, () -> new AlertDialog.Builder(this)
                     .setTitle("Создать свой график?").setMessage("Пример и его локальные правки будут удалены с телефона.")
@@ -252,6 +331,7 @@ public class MainActivity extends Activity {
     }
 
     private void editShift(Schedule.Shift original) {
+        if (resetting) { toast("Дождитесь завершения сброса"); return; }
         ScrollView scroll = new ScrollView(this); LinearLayout form = column(); form.setPadding(dp(22), dp(8), dp(22), dp(8)); scroll.addView(form);
         form.addView(text("Сотрудник", 12, MUTED, true)); AutoCompleteTextView who = new AutoCompleteTextView(this);
         who.setText(original == null ? (employee == null ? "" : employee) : original.employee);
@@ -318,6 +398,7 @@ public class MainActivity extends Activity {
     }
 
     private void breakSettings() {
+        if (resetting) { toast("Дождитесь завершения сброса"); return; }
         LinearLayout form = column(); form.setPadding(dp(22), dp(8), dp(22), dp(8));
         form.addView(text("По фото: менее 8 часов — обед 30 минут, от 8 часов — 60. Правило согласуется с итогами; точную границу уточните у составителя графика.", 14, MUTED, false)); gap(form, 12);
         EditText threshold = input(form, "Порог длительности смены, минут", String.valueOf(store.rule.threshold), "480", InputType.TYPE_CLASS_NUMBER);
@@ -337,22 +418,50 @@ public class MainActivity extends Activity {
 
     private void fetch(String url) { fetch(url, false); }
 
-    private void fetch(String url, boolean initial) {
+    private void fetch(String url, boolean initial) { fetch(url, initial, false); }
+
+    private void setBusy(boolean value) {
+        busy = value;
+        if (refreshLayout != null) refreshLayout.setRefreshing(value);
+        if (sourceButton != null) { sourceButton.setEnabled(!value); sourceButton.setText(value ? "Загрузка…" : "Загрузить по ссылке"); }
+        if (fileButton != null) fileButton.setEnabled(!value);
+        if (resetButton != null) resetButton.setEnabled(!value);
+    }
+
+    private void refreshCurrentSource() {
+        if (busy) return;
+        if (store.sourceUrl.isEmpty()) {
+            if (refreshLayout != null) refreshLayout.setRefreshing(false);
+            toast("Укажите ссылку на таблицу в настройках"); return;
+        }
+        fetch(store.sourceUrl);
+    }
+
+    private void confirmReset() {
+        if (busy) return;
+        if (store.sourceUrl.isEmpty()) { error("Для сброса подключите Google-таблицу в настройках"); return; }
+        new AlertDialog.Builder(this).setTitle("Сбросить график к таблице?")
+                .setMessage("Все локальные добавления, изменения и удаления смен будут отменены во всех месяцах. Правило обедов вернётся к исходному. Сначала загрузим актуальную таблицу; при ошибке ваши данные сохранятся.")
+                .setNegativeButton("Отмена", null).setPositiveButton("Сбросить", (dialog, which) -> fetch(store.sourceUrl, false, true)).show();
+    }
+
+    private void fetch(String url, boolean initial, boolean reset) {
         if (busy) return;
         final String candidate = url.trim();
         try { GoogleSource.csvUrl(candidate); } catch (IllegalArgumentException e) { error(e.getMessage()); return; }
-        busy = true; render();
+        final boolean sameSource = !store.sourceUrl.isEmpty() && GoogleSource.csvUrl(candidate).equals(GoogleSource.csvUrl(store.sourceUrl));
+        resetting = reset; setBusy(true);
         io.execute(() -> {
             try {
                 Map<String, Schedule.Shift> parsed = CsvSchedule.read(GoogleSource.fetch(candidate));
                 runOnUiThread(() -> {
-                    if (isDestroyed()) return; busy = false;
-                    if (initial && parsed.values().stream().anyMatch(s -> s.employee.equals(store.owner))) {
-                        mutate(() -> {
-                            store.source = parsed; store.sourceUrl = candidate; store.sourceName = "Google Таблица";
-                            store.syncedAt = System.currentTimeMillis(); store.demo = false;
-                        });
-                    } else { render(); confirmImport(parsed, candidate, "Google / CSV по ссылке"); }
+                    if (isDestroyed()) return; resetting = false; setBusy(false);
+                    if (reset || (sameSource && !store.demo && !initial) || (initial && parsed.values().stream().anyMatch(s -> s.employee.equals(store.owner)))) {
+                        if (mutate(() -> store.applySource(parsed, candidate, "Google Таблица / CSV", reset))) {
+                            sourceDraft = candidate;
+                            toast(reset ? "График восстановлен из таблицы" : "График обновлён. Локальные правки сохранены");
+                        }
+                    } else confirmImport(parsed, candidate, "Google / CSV по ссылке");
                 });
             } catch (Exception e) { importError(e); }
         });
@@ -360,7 +469,7 @@ public class MainActivity extends Activity {
 
     private void importError(Exception e) {
         runOnUiThread(() -> {
-            if (isDestroyed()) return; busy = false; render();
+            if (isDestroyed()) return; resetting = false; setBusy(false);
             String message = e.getMessage();
             if (e instanceof java.net.UnknownHostException) message = "Не удалось подключиться. Проверьте интернет и адрес таблицы";
             else if (e instanceof java.net.SocketTimeoutException) message = "Источник не ответил вовремя. Попробуйте ещё раз";
@@ -373,8 +482,7 @@ public class MainActivity extends Activity {
         LinearLayout form = column(); form.setPadding(dp(22), dp(8), dp(22), dp(8));
         form.addView(text("Смен: " + parsed.size() + " · сотрудников: " + names.size() + "\n\nТекущий источник будет заменён целиком, включая другие месяцы." +
                 (parsed.isEmpty() ? "\nФайл не содержит смен: исходный график станет пустым." : ""), 15, INK, false));
-        CheckBox keep = new CheckBox(this); keep.setText(getString(R.string.keep_local_edits, store.edits.size()));
-        keep.setChecked(!store.demo && url.equals(store.sourceUrl)); keep.setEnabled(!store.edits.isEmpty()); form.addView(keep);
+        form.addView(text("Локальные правки сохранятся: " + store.edits.size() + ". Удалить их все можно только полным сбросом в настройках.", 13, MUTED, false));
         List<String> candidates = new ArrayList<>(names);
         form.addView(text("Выберите себя в таблице", 14, INK, true));
         Spinner ownerPicker = new Spinner(this);
@@ -384,8 +492,7 @@ public class MainActivity extends Activity {
         new AlertDialog.Builder(this).setTitle("Загрузить график?").setView(form).setNegativeButton("Отмена", null)
                 .setPositiveButton("Загрузить", (d, w) -> {
                     if (mutate(() -> {
-                        store.source = parsed; if (!keep.isChecked()) store.edits.clear();
-                        store.sourceUrl = url; store.sourceName = name; store.demo = false; store.syncedAt = System.currentTimeMillis();
+                        store.applySource(parsed, url, name, false);
                         if (!candidates.isEmpty()) store.owner = candidates.get(ownerPicker.getSelectedItemPosition());
                     })) {
                         employee = store.owner; sourceDraft = url; screen = 0;
@@ -448,11 +555,11 @@ public class MainActivity extends Activity {
         if (result != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         if (request == OPEN_CSV) {
-            busy = true; render();
+            setBusy(true);
             io.execute(() -> {
                 try (InputStream stream = getContentResolver().openInputStream(uri)) {
                     Map<String, Schedule.Shift> parsed = CsvSchedule.read(GoogleSource.readLimited(stream));
-                    runOnUiThread(() -> { if (isDestroyed()) return; busy = false; render(); confirmImport(parsed, "", "CSV с телефона"); });
+                    runOnUiThread(() -> { if (isDestroyed()) return; setBusy(false); confirmImport(parsed, "", "CSV с телефона"); });
                 } catch (Exception e) { importError(e); }
             });
         } else if ((request == EXPORT_CSV || request == EXPORT_TEMPLATE) && pendingExport != null) {
@@ -475,15 +582,15 @@ public class MainActivity extends Activity {
         if (bold) v.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL)); v.setLineSpacing(dp(2), 1); return v;
     }
     private Button button(String label, boolean primary, Runnable action) {
-        Button v = new Button(this); v.setText(label); v.setTextSize(14); v.setAllCaps(false); v.setTextColor(primary ? WHITE : INK);
-        v.setBackground(background(primary ? INK : 0x00000000, 12)); v.setMinHeight(dp(48)); v.setMinimumHeight(dp(48));
+        Button v = new Button(this); v.setText(label); v.setTextSize(14); v.setAllCaps(false); v.setTextColor(primary ? (dark ? GREEN : WHITE) : INK);
+        v.setBackground(background(primary ? (dark ? LIME : GREEN) : 0x00000000, 12)); v.setMinHeight(dp(48)); v.setMinimumHeight(dp(48));
         v.setMinWidth(dp(48)); v.setMinimumWidth(dp(48)); v.setPadding(dp(12), dp(8), dp(12), dp(8)); v.setOnClickListener(view -> action.run()); return v;
     }
     private GradientDrawable background(int color, int radius) { GradientDrawable d = new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(radius)); return d; }
-    private LinearLayout card() { LinearLayout v = column(); v.setPadding(dp(16), dp(16), dp(16), dp(16)); v.setBackground(background(WHITE, 16)); return v; }
+    private LinearLayout card() { LinearLayout v = column(); v.setPadding(dp(16), dp(16), dp(16), dp(16)); v.setBackground(background(CARD, 16)); return v; }
     private void gap(LinearLayout parent, int size) { parent.addView(new View(this), new LinearLayout.LayoutParams(1, dp(size))); }
     private void note(String message, Runnable click) {
-        TextView v = text(message, 12, INK, false); v.setPadding(dp(12), dp(10), dp(12), dp(10)); v.setBackground(background(0xFFE7EBD9, 10));
+        TextView v = text(message, 12, INK, false); v.setPadding(dp(12), dp(10), dp(12), dp(10)); v.setBackground(background(NOTE, 10));
         v.setOnClickListener(view -> click.run()); content.addView(v);
     }
     private EditText input(LinearLayout parent, String label, String value, String hint, int type) {

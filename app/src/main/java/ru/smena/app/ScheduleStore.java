@@ -44,6 +44,13 @@ public final class ScheduleStore {
 
     public Map<String, Schedule.Shift> all() { return Schedule.merge(source, edits); }
 
+    /** Normal refresh always preserves overrides, including additions and tombstones. */
+    public void applySource(Map<String, Schedule.Shift> fresh, String url, String name, boolean reset) {
+        source = new LinkedHashMap<>(fresh);
+        sourceUrl = url; sourceName = name; demo = false; syncedAt = System.currentTimeMillis();
+        if (reset) { edits.clear(); rule = Schedule.BreakRule.inferred(); }
+    }
+
     public void save() throws IOException {
         if (loadError != null) throw new IOException(loadError);
         FileOutputStream stream = null;
