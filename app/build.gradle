@@ -1,0 +1,35 @@
+plugins { id 'com.android.application' }
+
+def localConfig = new Properties()
+def configFile = rootProject.file('smena.local.properties')
+if (configFile.exists()) configFile.withReader('UTF-8') { localConfig.load(it) }
+def publicBuild = providers.gradleProperty('publicBuild').getOrElse('false').toBoolean()
+
+android {
+    namespace 'ru.smena.app'
+    compileSdk 36
+    defaultConfig {
+        applicationId 'ru.smena.app'
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName '1.0'
+        testInstrumentationRunner 'ru.smena.app.StoreInstrumentation'
+        resValue 'string', 'default_source_url', publicBuild ? '' : localConfig.getProperty('sourceUrl', '')
+        resValue 'string', 'default_employee', publicBuild ? '' : localConfig.getProperty('employee', '')
+    }
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    lint { abortOnError true }
+}
+
+dependencies { testImplementation 'junit:junit:4.13.2' }

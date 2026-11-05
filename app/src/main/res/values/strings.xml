@@ -1,0 +1,5 @@
+<resources>
+    <string name="shift_preview">Работа: %1$s · обед %2$d мин</string>
+    <string name="invalid_break_rule">Введите целые минуты: порог 1–1440, обеды 0–240</string>
+    <string name="keep_local_edits">Сохранить локальные правки (%1$d)</string>
+</resources>

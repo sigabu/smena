@@ -1,0 +1,16 @@
+.gradle/
+.android/
+**/build/
+local.properties
+*.iml
+.idea/
+output/
+__pycache__/
+*.pyc
+smena.local.properties
+dist/smena.apk
+dist/smena.apk.sha256
+график.jpg
+docs/photo-analysis/
+docs/screenshots/
+docs/private/
