@@ -10,6 +10,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 /** Time is always stored as integer minutes, never as decimal hours. */
 public final class Schedule {
@@ -69,6 +71,23 @@ public final class Schedule {
         for (Map.Entry<String, Shift> e : edits.entrySet()) {
             if (e.getValue() == null) result.remove(e.getKey()); else result.put(e.getKey(), e.getValue());
         }
+        return result;
+    }
+
+    public static Set<YearMonth> months(Iterable<Shift> shifts) {
+        Set<YearMonth> result = new TreeSet<>();
+        for (Shift shift : shifts) result.add(YearMonth.from(shift.date));
+        return result;
+    }
+
+    /** A CSV is a complete snapshot only of the months its dates explicitly identify. */
+    public static Map<String, Shift> refreshMonths(Map<String, Shift> saved, Map<String, Shift> fresh) {
+        Set<YearMonth> updated = months(fresh.values());
+        Map<String, Shift> result = new LinkedHashMap<>();
+        for (Map.Entry<String, Shift> entry : saved.entrySet()) {
+            if (!updated.contains(YearMonth.from(entry.getValue().date))) result.put(entry.getKey(), entry.getValue());
+        }
+        result.putAll(fresh);
         return result;
     }
 

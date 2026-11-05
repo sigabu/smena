@@ -197,6 +197,10 @@ public class MainActivity extends Activity {
         else if (store.syncedAt == 0 && !store.sourceUrl.isEmpty()) note(busy ? "Загружаем ваш график…" : "График ещё не загружен · откройте настройки", () -> { screen = 1; render(); });
         else if (!store.edits.isEmpty()) note("Локальных правок: " + store.edits.size() + " · сохранены на телефоне", () -> { screen = 1; render(); });
         else content.addView(text("Потяните вниз в начале экрана, чтобы обновить", 11, MUTED, false));
+        if (store.isArchived(month)) {
+            gap(content, 8);
+            content.addView(text("Архив · месяц сохранён на телефоне, в текущей таблице его нет", 12, MUTED, false));
+        }
         gap(content, 10);
         LinearLayout weekdays = row();
         for (String label : new String[]{"ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"}) {
@@ -292,7 +296,8 @@ public class MainActivity extends Activity {
         gap(content, 12); content.addView(text("Источник графика", 20, INK, true)); gap(content, 8);
         content.addView(text("Google Таблицы или CSV-файл. После загрузки график доступен без интернета.", 15, MUTED, false)); gap(content, 20);
         LinearLayout status = card(); status.addView(text(store.sourceName, 17, INK, true)); gap(status, 5);
-        status.addView(text(store.demo ? "Демонстрационные данные, имена вымышлены" : "Смен в источнике: " + store.source.size(), 13, MUTED, false));
+        status.addView(text(store.demo ? "Демонстрационные данные, имена вымышлены" : "Сохранено смен: " + store.source.size(), 13, MUTED, false));
+        if (!store.demo) status.addView(text("Месяцев на телефоне: " + Schedule.months(store.all().values()).size(), 13, MUTED, false));
         if (store.syncedAt != 0) status.addView(text("Загружен " + new java.text.SimpleDateFormat("dd.MM.yyyy HH:mm", RU).format(new java.util.Date(store.syncedAt)), 12, MUTED, false));
         status.addView(text("Локальных правок: " + store.edits.size(), 13, MUTED, false)); content.addView(status); gap(content, 12);
         content.addView(button("Мой сотрудник: " + (store.owner.isEmpty() ? "не выбран" : store.owner), false, this::chooseOwner)); gap(content, 12);
@@ -313,19 +318,19 @@ public class MainActivity extends Activity {
         content.addView(button("Скачать шаблон CSV", false, () -> export(EXPORT_TEMPLATE)));
         content.addView(button("Экспорт моего графика с правками", false, () -> export(EXPORT_CSV)));
         gap(content, 18); content.addView(text("Правки на телефоне", 20, INK, true)); gap(content, 6);
-        content.addView(text("Изменения сохраняются только здесь. При обновлении этого же источника они применяются поверх таблицы. В Google-таблицу приложение их не отправляет.", 13, MUTED, false));
+        content.addView(text("Ручные правки сохраняются только здесь и имеют приоритет при обновлении. Месяцы, которых больше нет в таблице, остаются в архиве. Переключайте месяцы стрелками в календаре.", 13, MUTED, false));
         if (!store.edits.isEmpty()) {
             gap(content, 10); content.addView(button("Посмотреть и отменить правки", false, this::showEdits));
         }
         gap(content, 18);
         content.addView(text("Полный сброс графика", 20, INK, true)); gap(content, 6);
-        content.addView(text("Загрузить актуальную таблицу и убрать все локальные изменения, добавления и удаления. Правило обедов вернётся к исходному. Тема и выбранный сотрудник сохранятся.", 13, MUTED, false));
+        content.addView(text("Загрузить актуальную таблицу и удалить весь архив и все локальные правки. Месяцы, которых нет в таблице, исчезнут. Правило обедов вернётся к исходному. Тема и выбранный сотрудник сохранятся.", 13, MUTED, false));
         resetButton = button("Сбросить график к таблице", false, this::confirmReset); resetButton.setEnabled(!busy); content.addView(resetButton);
         if (store.demo) {
             gap(content, 14); content.addView(button("Начать с пустого графика", false, () -> new AlertDialog.Builder(this)
                     .setTitle("Создать свой график?").setMessage("Пример и его локальные правки будут удалены с телефона.")
                     .setNegativeButton("Отмена", null).setPositiveButton("Создать", (d, w) -> mutate(() -> {
-                        store.source.clear(); store.edits.clear(); store.demo = false; store.sourceUrl = ""; store.sourceName = "Мой график"; store.syncedAt = 0; store.owner = "";
+                        store.source.clear(); store.edits.clear(); store.latestSourceMonths.clear(); store.demo = false; store.sourceUrl = ""; store.sourceName = "Мой график"; store.syncedAt = 0; store.owner = "";
                     })).show()));
         }
     }
@@ -441,7 +446,7 @@ public class MainActivity extends Activity {
         if (busy) return;
         if (store.sourceUrl.isEmpty()) { error("Для сброса подключите Google-таблицу в настройках"); return; }
         new AlertDialog.Builder(this).setTitle("Сбросить график к таблице?")
-                .setMessage("Все локальные добавления, изменения и удаления смен будут отменены во всех месяцах. Правило обедов вернётся к исходному. Сначала загрузим актуальную таблицу; при ошибке ваши данные сохранятся.")
+                .setMessage("Будут удалены весь архив и все локальные правки во всех месяцах. Останутся только смены из текущей таблицы. Правило обедов вернётся к исходному. Сначала загрузим и проверим таблицу; при ошибке ваши данные сохранятся.")
                 .setNegativeButton("Отмена", null).setPositiveButton("Сбросить", (dialog, which) -> fetch(store.sourceUrl, false, true)).show();
     }
 
@@ -459,7 +464,7 @@ public class MainActivity extends Activity {
                     if (reset || (sameSource && !store.demo && !initial) || (initial && parsed.values().stream().anyMatch(s -> s.employee.equals(store.owner)))) {
                         if (mutate(() -> store.applySource(parsed, candidate, "Google Таблица / CSV", reset))) {
                             sourceDraft = candidate;
-                            toast(reset ? "График восстановлен из таблицы" : "График обновлён. Локальные правки сохранены");
+                            toast(reset ? "График восстановлен из таблицы" : parsed.isEmpty() ? "В таблице нет смен. Сохранённый график не изменён" : "График обновлён. История и ручные правки сохранены");
                         }
                     } else confirmImport(parsed, candidate, "Google / CSV по ссылке");
                 });
@@ -480,8 +485,9 @@ public class MainActivity extends Activity {
     private void confirmImport(Map<String, Schedule.Shift> parsed, String url, String name) {
         TreeSet<String> names = new TreeSet<>(); for (Schedule.Shift s : parsed.values()) names.add(s.employee);
         LinearLayout form = column(); form.setPadding(dp(22), dp(8), dp(22), dp(8));
-        form.addView(text("Смен: " + parsed.size() + " · сотрудников: " + names.size() + "\n\nТекущий источник будет заменён целиком, включая другие месяцы." +
-                (parsed.isEmpty() ? "\nФайл не содержит смен: исходный график станет пустым." : ""), 15, INK, false));
+        form.addView(text("Смен: " + parsed.size() + " · сотрудников: " + names.size() +
+                (parsed.isEmpty() ? "\n\nФайл не содержит смен. Сохранённая история не будет удалена." : "\n\nОбновятся только месяцы, указанные в файле. Остальные месяцы останутся в архиве.") +
+                (store.demo ? "\nДемонстрационный график будет заменён." : ""), 15, INK, false));
         form.addView(text("Локальные правки сохранятся: " + store.edits.size() + ". Удалить их все можно только полным сбросом в настройках.", 13, MUTED, false));
         List<String> candidates = new ArrayList<>(names);
         form.addView(text("Выберите себя в таблице", 14, INK, true));

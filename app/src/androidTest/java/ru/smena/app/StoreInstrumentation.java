@@ -61,7 +61,28 @@ public class StoreInstrumentation extends Instrumentation {
             check(loaded.edits.isEmpty() && loaded.all().keySet().equals(fresh.keySet()), "Full reset restores exactly the fresh source");
             check(loaded.all().get(added.key()).start == 480 && loaded.all().get(second.key()).breakMinutes == 0, "Reset removes all local shift values");
             check(loaded.rule.threshold == 480 && loaded.rule.shortBreak == 30 && loaded.rule.longBreak == 60, "Full reset restores default automatic lunches");
-            File data = new File(folder, "schedule.json"); Files.write(data.toPath(), "broken".getBytes(StandardCharsets.UTF_8));
+            // Existing 1.0/1.1 files have no history metadata. Preserve their data on upgrade.
+            org.json.JSONObject legacy = loaded.encode(); legacy.remove("latestSourceMonths");
+            File data = new File(folder, "schedule.json"); Files.write(data.toPath(), legacy.toString().getBytes(StandardCharsets.UTF_8));
+            loaded = new ScheduleStore(context);
+            check(loaded.loadError == null && loaded.source.size() == fresh.size()
+                    && loaded.latestSourceMonths.contains(java.time.YearMonth.of(2026,11)), "Old storage is upgraded without losing November");
+            loaded.edits.put(edit.key(), edit); loaded.edits.put(first.key(), null);
+            int novemberMinutes = Schedule.totals(Schedule.select(loaded.all(), java.time.YearMonth.of(2026,11), "Анна"), loaded.rule).net;
+            Schedule.Shift december = new Schedule.Shift("Анна", "Зал", LocalDate.of(2026,12,1), 540, 1080, false, null);
+            java.util.Map<String, Schedule.Shift> nextMonth = new java.util.LinkedHashMap<>(); nextMonth.put(december.key(), december);
+            loaded.applySource(nextMonth, loaded.sourceUrl, "December", false); loaded.save(); loaded = new ScheduleStore(context);
+            check(loaded.source.size() == fresh.size() + 1 && loaded.isArchived(java.time.YearMonth.of(2026,11))
+                    && !loaded.isArchived(java.time.YearMonth.of(2026,12)), "November is archived and December remains current after restart");
+            check(Schedule.totals(Schedule.select(loaded.all(), java.time.YearMonth.of(2026,11), "Анна"), loaded.rule).net == novemberMinutes
+                    && loaded.edits.size() == 2, "Archived total and manual edits survive rollover and restart");
+            loaded.applySource(new java.util.LinkedHashMap<>(), loaded.sourceUrl, "Empty", false); loaded.save(); loaded = new ScheduleStore(context);
+            check(loaded.source.size() == fresh.size() + 1 && loaded.isArchived(java.time.YearMonth.of(2026,11))
+                    && !loaded.isArchived(java.time.YearMonth.of(2026,12)), "Empty refresh preserves stored months and metadata");
+            loaded.applySource(nextMonth, loaded.sourceUrl, "Reset to December", true); loaded.save(); loaded = new ScheduleStore(context);
+            check(loaded.source.size() == 1 && loaded.source.containsKey(december.key()) && loaded.edits.isEmpty()
+                    && !loaded.isArchived(java.time.YearMonth.of(2026,11)), "Explicit full reset removes history and all overrides");
+            Files.write(data.toPath(), "broken".getBytes(StandardCharsets.UTF_8));
             ScheduleStore broken = new ScheduleStore(context);
             check(broken.loadError != null, "Corruption is visible");
             try { broken.save(); throw new AssertionError("Corrupted storage should not be overwritten"); }
