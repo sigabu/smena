@@ -13,10 +13,13 @@ import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 public final class ScheduleStore {
     public Map<String, Schedule.Shift> source = new LinkedHashMap<>();
     public Map<String, Schedule.Shift> edits = new LinkedHashMap<>();
+    public Set<YearMonth> latestSourceMonths = new TreeSet<>();
     public Schedule.BreakRule rule = Schedule.BreakRule.inferred();
     public String sourceUrl = "", sourceName = "Пример графика";
     public String owner = "Анна Смирнова";
@@ -44,6 +47,20 @@ public final class ScheduleStore {
 
     public Map<String, Schedule.Shift> all() { return Schedule.merge(source, edits); }
 
+    /** Keep absent months as history; overrides survive every normal refresh. */
+    public void applySource(Map<String, Schedule.Shift> fresh, String url, String name, boolean reset) {
+        boolean replaceAll = reset || demo;
+        source = replaceAll ? new LinkedHashMap<>(fresh) : Schedule.refreshMonths(source, fresh);
+        // An empty table does not identify which month was cleared; preserve history and its metadata.
+        if (replaceAll || !fresh.isEmpty()) latestSourceMonths = Schedule.months(fresh.values());
+        sourceUrl = url; sourceName = name; demo = false; syncedAt = System.currentTimeMillis();
+        if (reset) { edits.clear(); rule = Schedule.BreakRule.inferred(); }
+    }
+
+    public boolean isArchived(YearMonth month) {
+        return !demo && !latestSourceMonths.contains(month) && Schedule.months(source.values()).contains(month);
+    }
+
     public void save() throws IOException {
         if (loadError != null) throw new IOException(loadError);
         FileOutputStream stream = null;
@@ -62,6 +79,8 @@ public final class ScheduleStore {
         root.put("threshold", rule.threshold); root.put("shortBreak", rule.shortBreak); root.put("longBreak", rule.longBreak);
         JSONArray base = new JSONArray(); for (Schedule.Shift s : source.values()) base.put(encodeShift(s));
         root.put("source", base);
+        JSONArray months = new JSONArray(); for (YearMonth month : latestSourceMonths) months.put(month.toString());
+        root.put("latestSourceMonths", months);
         JSONArray local = new JSONArray();
         for (Map.Entry<String, Schedule.Shift> e : edits.entrySet()) {
             JSONObject item = new JSONObject(); item.put("key", e.getKey());
@@ -81,8 +100,13 @@ public final class ScheduleStore {
             JSONObject item = array.getJSONObject(i); local.put(item.getString("key"), item.isNull("shift") ? null : decodeShift(item.getJSONObject("shift")));
         }
         Schedule.BreakRule parsedRule = new Schedule.BreakRule(root.getInt("threshold"), root.getInt("shortBreak"), root.getInt("longBreak"));
+        Set<YearMonth> parsedMonths = new TreeSet<>();
+        JSONArray storedMonths = root.optJSONArray("latestSourceMonths");
+        if (storedMonths == null) parsedMonths.addAll(Schedule.months(base.values())); // Upgrade existing 1.0/1.1 files in place.
+        else for (int i = 0; i < storedMonths.length(); i++) parsedMonths.add(YearMonth.parse(storedMonths.getString(i)));
         sourceUrl = root.getString("url"); sourceName = root.getString("name"); syncedAt = root.getLong("syncedAt"); demo = root.getBoolean("demo");
         source = base; edits = local; rule = parsedRule; owner = root.optString("owner", "");
+        latestSourceMonths = parsedMonths;
     }
 
     private JSONObject encodeShift(Schedule.Shift s) throws JSONException {
@@ -108,5 +132,6 @@ public final class ScheduleStore {
                 source.put(s.key(), s);
             }
         }
+        latestSourceMonths = Schedule.months(source.values());
     }
 }

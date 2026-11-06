@@ -10,6 +10,8 @@ __pycache__/
 smena.local.properties
 dist/smena.apk
 dist/smena.apk.sha256
+dist/smena-[0-9]*.apk
+dist/smena-[0-9]*.apk.sha256
 график.jpg
 docs/photo-analysis/
 docs/screenshots/
