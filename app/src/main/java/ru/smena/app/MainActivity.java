@@ -26,6 +26,9 @@ import android.widget.Toast;
 import android.widget.Switch;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.File;
+import java.text.NumberFormat;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.YearMonth;
@@ -44,7 +47,8 @@ public class MainActivity extends Activity {
     private int BG, INK, MUTED, CARD, NOTE, SHIFT_BG, SHIFT_INK, ORANGE;
     private boolean dark;
     private static final Locale RU = Locale.forLanguageTag("ru");
-    private static final int OPEN_CSV = 10, EXPORT_CSV = 11, EXPORT_TEMPLATE = 12;
+    private static final int OPEN_CSV = 10, EXPORT_CSV = 11, EXPORT_TEMPLATE = 12, ALLOW_UPDATE = 13;
+    private static final int CALENDAR = 0, SETTINGS = 1, SALARY = 2;
     private ScheduleStore store;
     private YearMonth month = YearMonth.now();
     private LocalDate day = LocalDate.now();
@@ -64,6 +68,10 @@ public class MainActivity extends Activity {
     private boolean resetting;
     private String pendingExport;
     private String sourceDraft;
+    private Button updateButton;
+    private boolean updateBusy;
+    private String updateStatus = "";
+    private File pendingUpdate;
 
     @Override public void onCreate(Bundle state) {
         dark = getSharedPreferences("appearance", MODE_PRIVATE).getBoolean("dark", false);
@@ -87,6 +95,8 @@ public class MainActivity extends Activity {
             pendingExport = state.getString("export");
             sourceDraft = state.getString("sourceDraft", store.sourceUrl);
             restoredScroll = state.getInt("scroll");
+            String updatePath = state.getString("pendingUpdate");
+            if (updatePath != null && updatePath.equals(AppUpdate.apkFile(this).getAbsolutePath())) pendingUpdate = new File(updatePath);
         }
         render();
         if (store.loadError != null) error(store.loadError);
@@ -99,6 +109,7 @@ public class MainActivity extends Activity {
         state.putString("employee", employee); state.putInt("screen", screen); state.putString("export", pendingExport);
         state.putString("sourceDraft", sourceDraft);
         state.putInt("scroll", bodyScroll == null ? 0 : bodyScroll.getScrollY());
+        if (pendingUpdate != null) state.putString("pendingUpdate", pendingUpdate.getAbsolutePath());
     }
 
     @Override protected void onDestroy() { io.shutdownNow(); super.onDestroy(); }
@@ -106,7 +117,7 @@ public class MainActivity extends Activity {
     private void render() {
         int scrollPosition = renderedScreen == screen && bodyScroll != null ? bodyScroll.getScrollY() : restoredScroll;
         restoredScroll = 0; renderedScreen = screen;
-        sourceButton = null; fileButton = null; resetButton = null; refreshLayout = null;
+        sourceButton = null; fileButton = null; resetButton = null; refreshLayout = null; updateButton = null;
         root = column(); root.setBackgroundColor(BG);
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
@@ -126,11 +137,12 @@ public class MainActivity extends Activity {
             refreshLayout.setRefreshing(busy);
             root.addView(refreshLayout, new LinearLayout.LayoutParams(-1, 0, 1));
         } else root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        if (screen == 0) calendarScreen(); else sourceScreen();
+        if (screen == CALENDAR) calendarScreen(); else if (screen == SALARY) salaryScreen(); else sourceScreen();
         LinearLayout nav = row(); nav.setPadding(dp(8), dp(5), dp(8), dp(5)); nav.setBackgroundColor(CARD);
-        String[] labels = {"Мой график", "Настройки"};
+        String[] labels = {"Мой график", "Зарплата", "Настройки"};
+        int[] tabs = {CALENDAR, SALARY, SETTINGS};
         for (int i = 0; i < labels.length; i++) {
-            final int tab = i; Button b = button(labels[i], screen == i, () -> { screen = tab; render(); });
+            final int tab = tabs[i]; Button b = button(labels[i], screen == tab, () -> { screen = tab; render(); });
             b.setTextSize(13); nav.addView(b, weight());
         }
         root.addView(nav);
@@ -239,6 +251,83 @@ public class MainActivity extends Activity {
         renderDayDetails();
     }
 
+    private String money(int minutes) {
+        return moneyKopecks(Salary.kopecks(minutes));
+    }
+
+    private String moneyKopecks(long kopecks) {
+        NumberFormat format = NumberFormat.getNumberInstance(RU);
+        format.setMinimumFractionDigits(0); format.setMaximumFractionDigits(2);
+        return format.format(BigDecimal.valueOf(kopecks, 2)) + " ₽";
+    }
+
+    private void salaryScreen() {
+        content.addView(text("Зарплата", 29, INK, true)); gap(content, 12);
+        monthHeader(); employeeSelector();
+        List<Schedule.Shift> shifts = Schedule.select(store.all(), month, employee);
+        Schedule.Totals total = Schedule.totals(shifts, store.rule);
+        SalaryAdvances advances = new SalaryAdvances(this);
+        final String salaryEmployee = employee;
+        final YearMonth salaryMonth = month;
+        long savedAdvance = advances.get(salaryEmployee, salaryMonth);
+        LinearLayout summary = column(); summary.setPadding(dp(20), dp(18), dp(20), dp(18)); summary.setBackground(background(GREEN, 20));
+        summary.addView(text("ПОЛНАЯ ЗАРПЛАТА НА РУКИ · ОЦЕНКА", 11, LIME, true));
+        summary.addView(text(money(total.net), 28, WHITE, true)); gap(summary, 8);
+        summary.addView(text(Schedule.hours(total.net) + " × " + Salary.HOURLY_RUBLES + " ₽/ч", 16, 0xFFE1EAD8, false));
+        summary.addView(text(total.count + " смен · обеды вычтены", 13, 0xFFBBCDC4, false)); gap(summary, 14);
+        summary.addView(text("ОСТАЛОСЬ ПОЛУЧИТЬ ПОСЛЕ АВАНСА", 11, LIME, true));
+        TextView remaining = text(moneyKopecks(Salary.remaining(total.net, savedAdvance)), 34, WHITE, true); summary.addView(remaining);
+        TextView paid = text("Полученный аванс: " + moneyKopecks(savedAdvance), 13, 0xFFBBCDC4, false); summary.addView(paid);
+        LinearLayout advanceCard = card();
+        EditText advance = input(advanceCard, "Полученный аванс, ₽", "",
+                "0", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        advance.setKeyListener(android.text.method.DigitsKeyListener.getInstance("0123456789., \u00a0\u202f"));
+        advance.setRawInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        advance.setText(savedAdvance == 0 ? "" : BigDecimal.valueOf(savedAdvance, 2).stripTrailingZeros().toPlainString().replace('.', ','));
+        advance.setEnabled(!salaryEmployee.isEmpty());
+        TextView advanceNote = text(salaryEmployee.isEmpty() ? "Сначала выберите сотрудника в настройках." : "Сохраняется автоматически отдельно для каждого месяца.", 12, MUTED, false);
+        advanceCard.addView(advanceNote); content.addView(advanceCard);
+        Runnable updateAdvance = () -> {
+            try {
+                long amount = Salary.parseAdvance(advance.getText().toString());
+                advances.set(salaryEmployee, salaryMonth, amount);
+                long balance = Salary.remaining(total.net, amount);
+                remaining.setText(moneyKopecks(balance)); paid.setText("Полученный аванс: " + moneyKopecks(amount));
+                advanceNote.setText(balance < 0 ? "Аванс превышает расчётную зарплату на " + moneyKopecks(-balance) + "." : "Сохраняется автоматически отдельно для каждого месяца.");
+                advanceNote.setTextColor(balance < 0 ? ORANGE : MUTED);
+            } catch (IllegalArgumentException e) {
+                remaining.setText("—"); paid.setText("Проверьте сумму аванса");
+                advanceNote.setText(e.getMessage()); advanceNote.setTextColor(ORANGE);
+            }
+        };
+        advance.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            public void onTextChanged(CharSequence s, int start, int before, int count) { updateAdvance.run(); }
+            public void afterTextChanged(Editable s) {}
+        });
+        if (!salaryEmployee.isEmpty()) updateAdvance.run();
+        gap(content, 12);
+        content.addView(summary); gap(content, 12);
+        content.addView(text("Расчёт примерный.", 13, MUTED, false));
+        if (store.demo) { gap(content, 12); note("Расчёт по примеру · подключите свой график", () -> { screen = SETTINGS; render(); }); }
+        if (store.isArchived(month)) { gap(content, 10); content.addView(text("Архив · расчёт по сохранённым сменам", 13, MUTED, false)); }
+        gap(content, 18);
+        LinearLayout details = card(); details.addView(text("Как рассчитано", 19, INK, true)); gap(details, 8);
+        details.addView(text("Время смен: " + Schedule.hours(total.gross), 14, INK, false));
+        details.addView(text("Обеды: −" + Schedule.hours(total.lunch), 14, MUTED, false));
+        details.addView(text("Оплачиваемое время: " + Schedule.hours(total.net), 14, INK, true));
+        gap(details, 6); details.addView(text("Учитываются выбранный сотрудник, ручные правки и настройки обедов. Минуты считаются точно: 1 мин = 5,40 ₽.", 12, MUTED, false)); content.addView(details);
+        gap(content, 18); content.addView(text("По сменам", 20, INK, true)); gap(content, 10);
+        if (shifts.isEmpty()) content.addView(text("В этом месяце нет смен. Добавьте их в графике или загрузите таблицу в настройках.", 14, MUTED, false));
+        for (Schedule.Shift shift : shifts) {
+            LinearLayout item = card(); LinearLayout top = row();
+            top.addView(text(shift.date.format(DateTimeFormatter.ofPattern("d MMMM", RU)), 16, INK, true), weight());
+            top.addView(text(money(shift.net(store.rule)), 16, INK, true)); item.addView(top); gap(item, 5);
+            item.addView(text(shift.timeRange() + " · " + Schedule.hours(shift.net(store.rule)), 13, MUTED, false));
+            content.addView(item); gap(content, 8);
+        }
+    }
+
     private void paintDay(LinearLayout cell, boolean selected) {
         boolean hasShift = Boolean.TRUE.equals(cell.getTag());
         cell.setSelected(selected);
@@ -293,6 +382,12 @@ public class MainActivity extends Activity {
         theme.setOnCheckedChangeListener((view, checked) -> {
             getSharedPreferences("appearance", MODE_PRIVATE).edit().putBoolean("dark", checked).apply(); recreate();
         });
+        gap(content, 12);
+        LinearLayout updates = card(); updates.addView(text("Обновление приложения", 20, INK, true)); gap(updates, 6);
+        updates.addView(text("Версия " + AppUpdate.installedName(this) + " · GitHub: sigabu/smena", 13, MUTED, false));
+        updates.addView(text(updateStatus.isEmpty() ? "Проверьте новую версию и установите её с GitHub." : updateStatus, 13, MUTED, false));
+        gap(updates, 8); updateButton = button(updateBusy ? "Подождите…" : "Проверить обновления", false, this::checkAppUpdate);
+        updateButton.setEnabled(!updateBusy); updates.addView(updateButton); content.addView(updates);
         gap(content, 12); content.addView(text("Источник графика", 20, INK, true)); gap(content, 8);
         content.addView(text("Google Таблицы или CSV-файл. После загрузки график доступен без интернета.", 15, MUTED, false)); gap(content, 20);
         LinearLayout status = card(); status.addView(text(store.sourceName, 17, INK, true)); gap(status, 5);
@@ -388,6 +483,82 @@ public class MainActivity extends Activity {
                 .setNegativeButton("Отмена", null).setPositiveButton("Удалить", (d, w) -> {
                     if (mutate(() -> removeShift(original))) dialog.dismiss();
                 }).show());
+    }
+
+    private void appUpdateState(boolean loading, String message) {
+        updateBusy = loading; updateStatus = message;
+        if (screen == SETTINGS) render();
+    }
+
+    private void checkAppUpdate() {
+        if (updateBusy) return;
+        appUpdateState(true, "Проверяем новую версию…");
+        io.execute(() -> {
+            try {
+                UpdateManifest update = AppUpdate.check();
+                runOnUiThread(() -> {
+                    if (isDestroyed()) return;
+                    if (update == null) {
+                        appUpdateState(false, "Обновление пока не опубликовано в GitHub.");
+                    } else if (update.versionCode <= AppUpdate.installedCode(this)) {
+                        appUpdateState(false, "У вас актуальная версия приложения.");
+                    } else {
+                        appUpdateState(false, "Доступна версия " + update.versionName);
+                        new AlertDialog.Builder(this).setTitle("Обновить до " + update.versionName + "?")
+                                .setMessage("Скачать " + String.format(RU, "%.1f МБ", update.size / (1024.0 * 1024))
+                                        + " с GitHub. График, архив и настройки сохранятся. Установку нужно подтвердить в Android.")
+                                .setNegativeButton("Позже", null).setPositiveButton("Скачать", (dialog, which) -> downloadAppUpdate(update)).show();
+                    }
+                });
+            } catch (Exception e) { appUpdateError(e); }
+        });
+    }
+
+    private void downloadAppUpdate(UpdateManifest update) {
+        if (updateBusy) return;
+        appUpdateState(true, "Скачиваем и проверяем версию " + update.versionName + "…");
+        io.execute(() -> {
+            try {
+                File apk = AppUpdate.download(this, update);
+                runOnUiThread(() -> {
+                    if (isDestroyed()) return;
+                    pendingUpdate = apk;
+                    appUpdateState(false, "Версия " + update.versionName + " скачана и проверена.");
+                    installAppUpdate();
+                });
+            } catch (Exception e) { appUpdateError(e); }
+        });
+    }
+
+    private void appUpdateError(Exception exception) {
+        runOnUiThread(() -> {
+            if (isDestroyed()) return;
+            appUpdateState(false, "Не удалось проверить или скачать обновление. Попробуйте ещё раз.");
+            error("Обновление приложения: " + exception.getMessage());
+        });
+    }
+
+    private void installAppUpdate() {
+        if (pendingUpdate == null || !pendingUpdate.isFile()) { error("Файл обновления недоступен. Скачайте его повторно."); return; }
+        try {
+            if (!getPackageManager().canRequestPackageInstalls()) {
+                new AlertDialog.Builder(this).setTitle("Разрешить установку обновления")
+                        .setMessage("На следующем экране разрешите установку из приложения «Смена», затем вернитесь сюда.")
+                        .setNegativeButton("Отмена", (dialog, which) -> pendingUpdate = null)
+                        .setPositiveButton("Открыть настройки", (dialog, which) -> {
+                            try {
+                                startActivityForResult(new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                        Uri.parse("package:" + getPackageName())), ALLOW_UPDATE);
+                            } catch (android.content.ActivityNotFoundException e) { error("Не удалось открыть настройки установки Android"); }
+                        }).show();
+                return;
+            }
+            Uri uri = Uri.parse("content://" + getPackageName() + ".updates/smena-update.apk");
+            Intent install = new Intent(Intent.ACTION_VIEW).setDataAndType(uri, UpdateProvider.MIME)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            install.setClipData(android.content.ClipData.newRawUri("Обновление Смены", uri));
+            startActivity(install); pendingUpdate = null;
+        } catch (android.content.ActivityNotFoundException | SecurityException e) { error("Не удалось открыть установщик Android: " + e.getMessage()); }
     }
 
     private Schedule.Shift formShift(EditText who, EditText dept, EditText date, EditText start, EditText end, CheckBox next, EditText lunch, boolean preview) {
@@ -558,6 +729,11 @@ public class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == ALLOW_UPDATE) {
+            if (getPackageManager().canRequestPackageInstalls()) installAppUpdate();
+            else { pendingUpdate = null; toast("Установка не разрешена. Проверить обновление можно позже."); }
+            return;
+        }
         if (result != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         if (request == OPEN_CSV) {
